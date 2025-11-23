@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: sales_intel_db
+    environment:
+      POSTGRES_DB: sales_intelligence
+      POSTGRES_USER: sales_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme123}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./packages/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales_user -d sales_intelligence"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sales_intel_network
+
+  # MindsDB for ML predictions
+  mindsdb:
+    image: mindsdb/mindsdb:latest
+    container_name: sales_intel_mindsdb
+    ports:
+      - "47334:47334"  # HTTP API
+      - "47335:47335"  # MySQL API
+    environment:
+      - MINDSDB_STORAGE_DIR=/root/mdb_storage
+    volumes:
+      - mindsdb_data:/root/mdb_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sales_intel_network
+
+  # Agent backend (FastAPI + Agno)
+  agent_backend:
+    build:
+      context: ./apps/agent-os
+      dockerfile: Dockerfile
+    container_name: sales_intel_agent
+    environment:
+      DATABASE_URL: postgresql://sales_user:${DB_PASSWORD:-changeme123}@postgres:5432/sales_intelligence
+      MINDSDB_URL: http://mindsdb:47334
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      COMPOSIO_USER_ID: ${COMPOSIO_USER_ID:-default}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mindsdb:
+        condition: service_started
+    volumes:
+      - ./packages:/app/packages
+    networks:
+      - sales_intel_network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile
+    container_name: sales_intel_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - agent_backend
+    networks:
+      - sales_intel_network
+    command: npm run dev
+
+volumes:
+  postgres_data:
+    driver: local
+  mindsdb_data:
+    driver: local
+
+networks:
+  sales_intel_network:
+    driver: bridge
